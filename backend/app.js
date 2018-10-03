@@ -39,13 +39,21 @@ function deepCopy(obj){
 // The global game state.
 var gameState = {
     _state: {
+        turnStatus: "status_lobby",
+        turnNumber: 0,
         players: {},
         playerHands: {},
         structures: {},
+        log: [],
+        resourceDeck: [],
         minorDisasterDeck: [],
         majorDisasterDeck: [],
-        resourceDeck: [],
-        eventDeck: []
+        eventDeck: [],
+        nukeStacks: {},
+        buildStacks: {},
+        revealedEvent: undefined,
+        revealedDisaster: undefined,
+        votes: {}
     },
     // A list of codes to ensure that each player only joins once.
     _playerCodes: [
@@ -85,12 +93,13 @@ var gameState = {
         // Gets a subjective view of the game board (so that you can't see other
         // people's cards, etc).
         var cleanedState = deepCopy(this._state);//This deep-copies _state.
-        for(var i in Object.keys(cleanedState.playerHands)){
+        for(var i in Object.keys(cleanedState.players)){
             if(i == playerId){continue;}
             for(var j = 0; j < cleanedState.playerHands[i].length; ++j){
                 cleanedState.playerHands[i][j]["name"] = "Unknown";
                 cleanedState.playerHands[i][j]["internal_name"] = "unknown";
             }
+            cleanedState.playerHands[i].role = "Unknown";
         }
         cleanedState.minorDisasterDeckSize = cleanedState.minorDisasterDeck.length;
         cleanedState.minorDisasterDeck = undefined;
@@ -144,7 +153,7 @@ var gameState = {
         //2 copies of black market nuke.
         for(let x = 0; x < 2; ++x){
             this._state.resourceDeck.push(new Card("Black Market Nuclear Warhead",
-                                                       generateCardId(), "nuke"));
+                                                   generateCardId(), "nuke"));
         }
         shuffleArray(this._state.resourceDeck);
     },
@@ -223,10 +232,89 @@ var gameState = {
         //Begin with the draw phase.
         this.drawPhase();
     },
+    _getStructureCount: function(internalName, playerId){
+        let total = 0;
+        for(let c in this._state.structures[playerId]){
+            let card = this._state.structures[playerId][c];
+            if(card["internal_name"] == internalName){
+                total += 1;
+            }
+        }
+        return total;
+    },
+    drawCards: function(numCards, playerId){
+        let cardsToDraw = numCards;
+        if(this._state.resourceDeck.length <= cardsToDraw){
+            cardsToDraw = this._state.resourceDeck.length;
+        }
+        this._state.playerHands[playerId] = this._state.resourceDeck.splice(-cardsToDraw);
+    },
+    log: function(msg){
+        this._state.log.push(msg);
+    },
     drawPhase: function(){
         //Each player draws a card.
         for(let player in Object.keys(this._state.players)){
-            this._state.playerHands[player] = this._state.resourceDeck.splice(-5);
+            let numDrills = this._getStructureCount("drill", player);
+            this.drawCards(numDrills + 1);
+        }
+        this.eventRevealPhase();
+    },
+    submitVoteForPlayer(voterId, playerId){
+        //Return true if the vote is valid, false otherwise.
+        if(this._state.vote[playerId] != undefined){
+            return false;
+        }
+        if(Object.keys(this._state.players).indexOf(voterId) != -1){
+            return false;
+        }
+        this._state.vote[voterId] = playerId;
+        //TODO: re-vote if no majority, otherwise enact effects,
+        return true;
+    },
+    submitVoteYesNo(voterId, vote){
+        //Return true if the vote is valid, false otherwise.
+        if(Object.keys(this._state.players).indexOf(voterId) != -1){
+            return false;
+        }
+        this._state.vote[voterId] = vote;
+        //TODO: re-vote if no majority, otherwise enact effects,
+        return true;
+    },
+    eventRevealPhase: function(){
+        //Get the top card from the event deck and reveal it.
+        if(this._state.revealedEvent == undefined){
+            this._state.revealedEvent = this._state.eventDeck.splice(-1);
+        }
+        this.eventResolutionPhase();
+    },
+    eventResolutionPhase: function(){
+        //We assume there will always be an event revealed.
+        switch(this._state.revealedEvent["internal_name"]){
+        case "foreign_aid":
+            this._state.turnStatus = "status_give_card_foreign_aid";
+            break;
+        case "international_grant":
+            this._state.turnStatus = "status_voting_player";
+            break;
+        case "conservation_effort":
+            this._state.turnStatus = "status_voting_yes_no";
+            break;
+        case "deep_sea_exploration":
+            this.log("Everyone draws a card due to deep-sea discoveries.");
+            for(let player in Object.keys(this._state.players)){
+                this.drawCards(1, player);
+            }
+            break;
+        case "militarisation":
+            this._state.turnStatus = "status_voting_player";
+            break;
+        case "international_investigation":
+            this._state.turnStatus = "status_voting_player";
+            break;
+        case "early_warning_system":
+            this._state.turnStatus = "status_voting_yes_no";
+            break;
         }
     }
 };
@@ -276,7 +364,18 @@ app.post("/join", (req, res) => {
     }
 });
 
-gameState.openLobby(1);
+app.post("/vote_for_player", (req, res) => {
+    if(gameState.getServerStatus() != ""){
+        res.send(gameState.getSubjectiveState(newPlayer.id));
+        return;
+    }
+    var voteFor = req.body["vote_for"];
+    var id = gameState.ipToPlayerId(req.connection.remoteAddress);
+    gameState.submitVoteForPlayer(id, voteFor);
+    res.send(gameState.getSubjectiveState(newPlayer.id));
+});
+
+gameState.openLobby(2);
 
 app.listen(3000, () => {
     console.log("Listening on port 3000.");
